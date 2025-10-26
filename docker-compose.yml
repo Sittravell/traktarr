@@ -1,0 +1,10 @@
+version: "3.8"
+services:
+  traktarr:
+    image: sittravell/traktarr:latest
+    container_name: traktarr
+    ports:
+      - "5252:5252"
+    volumes:
+      - ./config.json:/data/config.json # mounts ./data/config.json into container at /data/config.json
+    restart: unless-stopped

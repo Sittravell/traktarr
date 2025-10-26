@@ -1,0 +1,7 @@
+{
+    "client_id": "YOUR_TRAKT_CLIENT_ID",
+    "client_secret": "YOUR_TRAKT_CLIENT_SECRET",
+    "redirect_uri": "YOUR_TRAKT_REDIRECT_URI",
+    "refresh_token": "REFRESH_TOKEN"
+  }
+  
