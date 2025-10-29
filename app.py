@@ -22,12 +22,10 @@ from threading import Lock
 import requests
 from flask import Flask, jsonify, request, abort
 
-# Configuration
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "config.json")
 TRAKT_TOKEN_URL = "https://api.trakt.tv/oauth/token"
 TRAKT_LIST_URL_TEMPLATE = "https://api.trakt.tv/lists/{list_id}/items"
 
-# Logging
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("trakt-chunker")
 
@@ -61,19 +59,16 @@ def save_config(cfg: dict):
 
 def token_is_valid(cfg: dict) -> bool:
     access = cfg.get("access_token")
-    expires_at = cfg.get("expires_at")  # epoch seconds
+    expires_at = cfg.get("expires_at") 
     if not access or not expires_at:
         return False
     try:
-        return time.time() < float(expires_at) - 5  # small buffer
+        return time.time() < float(expires_at) - 5 
     except Exception:
         return False
 
 
 def store_tokens(cfg: dict, resp_json: dict):
-    """
-    Expects resp_json with access_token, refresh_token, expires_in, created_at (optional)
-    """
     access = resp_json.get("access_token")
     refresh = resp_json.get("refresh_token")
     expires_in = resp_json.get("expires_in")
@@ -87,16 +82,12 @@ def store_tokens(cfg: dict, resp_json: dict):
             cfg["expires_at"] = int(created_at) + int(expires_in)
         except Exception:
             cfg["expires_at"] = int(time.time()) + int(expires_in)
-    # optionally store raw last token response for debugging
     cfg["_last_token_response"] = {
         k: v for k, v in resp_json.items() if k not in ("access_token", "refresh_token")
     }
 
 
 def request_token_via_refresh(cfg: dict) -> dict:
-    """
-    POST grant_type=refresh_token flow.
-    """
     logger.info("Attempting token refresh with refresh_token.")
     body = {
         "grant_type": "refresh_token",
@@ -111,17 +102,12 @@ def request_token_via_refresh(cfg: dict) -> dict:
 
 
 def ensure_access_token():
-    """
-    Ensure config has a valid access token. If not, try refresh token flow,
-    otherwise try authorization code flow. Saves to config on success.
-    """
     with _config_lock:
         cfg = load_config()
         if token_is_valid(cfg):
             logger.debug("Access token found and valid.")
             return cfg.get("access_token"), cfg
 
-        # Try refresh_token
         refresh = cfg.get("refresh_token")
         if refresh:
             try:
@@ -143,16 +129,11 @@ def ensure_access_token():
 
 
 def fetch_list_items(list_id: str, access_token: str):
-    """
-    Fetch all items from Trakt list. (Simple single GET call; pagination not implemented.)
-    If you expect very large lists, implement paging (Trakt supports pagination).
-    """
     url = TRAKT_LIST_URL_TEMPLATE.format(list_id=list_id)
     headers = {
         "Authorization": f"Bearer {access_token}",
         "trakt-api-version": "2",
     }
-    # include trakt-api-key (client id) if present in config for compatibility
     cfg = load_config()
     client_id = cfg.get("client_id")
     if client_id:
@@ -163,38 +144,32 @@ def fetch_list_items(list_id: str, access_token: str):
     return r.json()
 
 
-def extract_tmdb_ids(items, mediaType):
-    """
-    Given the trakt list items array, extract TMDB ids for movies.
-    Return list of integers (tmdb ids) in the order returned by Trakt.
-    """
-    ids = []
-    for it in items:
+def transformResponse(items, mediaType):
+    transformed = []
+    for item in items:
         try:
-            if it.get("type") != mediaType:
-                # skip if not input type
+            if item.get("type") != mediaType:
                 continue
-            data = it.get(mediaType, {})
-            ids_map = data.get("ids", {})
-            tmdb = ids_map.get("tmdb")
-            if tmdb:
-                ids.append(int(tmdb))
+
+            media = item.get(mediaType, {})
+            idDict = media.get("ids", {})
+
+            transformed.append({ 
+                "id": int(idDict.get("tmdb") or 0),
+                "title": media.get('title'),
+                "tmdbId": int(idDict.get("tmdb") or 0),
+                "tvdbId": int(idDict.get("tvdb") or 0),
+                "imdbId": idDict.get("imdb"),
+            })
         except Exception:
-            logger.exception("Skipping item due to unexpected structure: %s", it)
-    return ids
+            logger.exception("Skipping item due to unexpected structure: %s", item)
+    return transformed
 
 
 def compute_chunk_for_now(start_date_str: str, interval_days: int, limit: int, total_len: int):
-    """
-    Compute which chunk index to use based on the current UTC date/time.
-
-    chunk_index = floor((now - start_date) / interval_days)
-    returns (start_index, end_index) inclusive/exclusive slice (start_index, end_index)
-    """
     try:
         start_dt = datetime.fromisoformat(start_date_str)
     except Exception:
-        # try parsing YYYY-MM-DD
         start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
     start_dt = start_dt.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
@@ -203,19 +178,13 @@ def compute_chunk_for_now(start_date_str: str, interval_days: int, limit: int, t
         raise ValueError("interval (step) must be positive")
 
     delta = now - start_dt
-    # number of full intervals elapsed (can be negative)
     intervals_elapsed = math.floor(delta.total_seconds() / (interval_days * 86400))
     if intervals_elapsed < 0:
-        # before start date: return first chunk
         intervals_elapsed = 0
 
-    start_index = intervals_elapsed * limit
-    end_index = start_index + limit
-    # don't exceed total length
-    if start_index >= total_len:
-        # nothing left; return empty slice
-        return 0, 0
-    return start_index, min(end_index, total_len)
+    start_index = 0
+    end_index = (intervals_elapsed * limit) + limit
+    return start_index, min(end_index, total_len - 1)
 
 
 @app.route("/list/<list_id>", methods=["GET"])
@@ -260,6 +229,7 @@ def list_handler(list_id):
 
     try:
         items = fetch_list_items(list_id, access_token)
+        items.sort(key=lambda x: datetime.fromisoformat(x["listed_at"].replace("Z", "+00:00")))
     except requests.HTTPError as e:
         logger.exception("Error fetching trakt list items")
         return jsonify({"error": f"Trakt API error: {e}"}), 502
@@ -267,18 +237,12 @@ def list_handler(list_id):
         logger.exception("Unexpected error fetching list")
         return jsonify({"error": "Failed to fetch list items"}), 500
 
-    tmdb_ids = extract_tmdb_ids(items, mediaType)
-    total = len(tmdb_ids)
+    transformed = transformResponse(items, mediaType)
+    total = len(transformed)
 
     start_idx, end_idx = compute_chunk_for_now(start, step_int, chunk_int, total)
-    if start_idx == end_idx:
-        # nothing to return (out of range)
-        result = []
-    else:
-        slice_ids = tmdb_ids[start_idx:end_idx]
-        result = [{"id": i, "tmdbId": i} for i in slice_ids]
+    result = transformed[start_idx:end_idx]
 
-    # return as JSON array
     return jsonify(result)
 
 
