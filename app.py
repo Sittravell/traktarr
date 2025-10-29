@@ -200,6 +200,8 @@ def list_handler(list_id):
     step = request.args.get("step")
     chunk = request.args.get("chunk")
     mediaType = request.args.get("type")
+    sortBy = "added"
+    direction = request.args.get("dir") or "desc"
 
     if not start or not step or not chunk or not mediaType:
         return (
@@ -229,7 +231,8 @@ def list_handler(list_id):
 
     try:
         items = fetch_list_items(list_id, access_token)
-        items.sort(key=lambda x: datetime.fromisoformat(x["listed_at"].replace("Z", "+00:00")))
+        if sortBy == "added":
+            items.sort(key=lambda x: datetime.fromisoformat(x["listed_at"].replace("Z", "+00:00")), reverse=direction == "asc")
     except requests.HTTPError as e:
         logger.exception("Error fetching trakt list items")
         return jsonify({"error": f"Trakt API error: {e}"}), 502
